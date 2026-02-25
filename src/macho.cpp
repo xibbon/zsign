@@ -4,6 +4,7 @@
 #include "openssl.h"
 #include "signing.h"
 #include "macho.h"
+#include <sys/stat.h>
 
 ZMachO::ZMachO()
 {
@@ -125,6 +126,16 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 {
 	if (NULL == m_pBase || m_arrArchOes.empty()) {
 		return false;
+	}
+
+	mode_t originalMode = 0;
+	bool hasOriginalMode = false;
+	{
+		struct stat st;
+		if (0 == stat(m_strFile.c_str(), &st)) {
+			originalMode = st.st_mode & 07777;
+			hasOriginalMode = true;
+		}
 	}
 
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
@@ -252,6 +263,10 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 				return false;
 			}
 
+			if (hasOriginalMode) {
+				chmod(strNewFatMachOFile.c_str(), originalMode);
+			}
+
 			ZFile::RemoveFile(m_strFile.c_str());
 			if (0 != rename(strNewFatMachOFile.c_str(), m_strFile.c_str())) {
 				ZFile::RemoveFile(strNewFatMachOFile.c_str());
@@ -267,6 +282,16 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 bool ZMachO::ReallocCodeSignSpace()
 {
 	ZLog::Warn(">>> Realloc CodeSignature space... \n");
+
+	mode_t originalMode = 0;
+	bool hasOriginalMode = false;
+	{
+		struct stat st;
+		if (0 == stat(m_strFile.c_str(), &st)) {
+			originalMode = st.st_mode & 07777;
+			hasOriginalMode = true;
+		}
+	}
 
 	vector<uint32_t> arrMachOesSizes;
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
@@ -286,6 +311,9 @@ bool ZMachO::ReallocCodeSignSpace()
 		ZFile::RemoveFile(m_strFile.c_str());
 		string strNewArchOFile = m_strFile + ".archo.0";
 		if (0 == rename(strNewArchOFile.c_str(), m_strFile.c_str())) {
+			if (hasOriginalMode) {
+				chmod(m_strFile.c_str(), originalMode);
+			}
 			return OpenFile(m_strFile.c_str());
 		}
 	} else { //fat
@@ -353,6 +381,9 @@ bool ZMachO::ReallocCodeSignSpace()
 
 		ZFile::RemoveFile(m_strFile.c_str());
 		if (0 == rename(strNewFatMachOFile.c_str(), m_strFile.c_str())) {
+			if (hasOriginalMode) {
+				chmod(m_strFile.c_str(), originalMode);
+			}
 			return OpenFile(m_strFile.c_str());
 		}
 	}
