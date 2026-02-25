@@ -444,8 +444,9 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	}
 
 	if (NULL != strstr(strEntitlementsSlot.data() + 8, "<key>get-task-allow</key>")) {
-		// TODO: Check if get-task-allow is actually set to true
-		uExecSegFlags |= CS_EXECSEG_MAIN_BINARY | CS_EXECSEG_ALLOW_UNSIGNED;
+		// Match Apple codesign behavior for development entitlements: mark main binary only.
+		// CS_EXECSEG_ALLOW_UNSIGNED causes strict verification failures on macOS arm64.
+		uExecSegFlags |= CS_EXECSEG_MAIN_BINARY;
 	}
 
 	uint8_t uPageSizeLog2 = resolve_code_directory_page_size_log2(m_pSignBase);
