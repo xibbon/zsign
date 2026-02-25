@@ -14,6 +14,7 @@ public:
 										uint32_t uCodeLength,
 										uint8_t* pCodeSlotsData,
 										uint32_t uCodeSlotsDataLength,
+										uint8_t pageSizeLog2,
 										uint64_t execSegLimit,
 										uint64_t execSegFlags,
 										const string& strBundleId,
@@ -58,4 +59,3 @@ public:
 
 	static bool ParseCodeSignatureEntitlements(uint8_t *pCSBase, string &entitlements);
 };
-

@@ -49,6 +49,7 @@ public:
 	bool			m_bEncrypted;
 	bool			m_b64Bit;
 	bool			m_bBigEndian;
+	bool			m_bMacOSBinary;
 	bool			m_bEnoughSpace;
 	uint8_t*		m_pCodeSignSegment;
 	uint8_t*		m_pLinkEditSegment;
@@ -56,7 +57,5 @@ public:
 	uint32_t		m_uFileType;
 	mach_header*	m_pHeader;
 	uint32_t		m_uHeaderSize;
-
-private:
-	static uint64_t s_uExecSegLimit;
+	uint64_t		m_uExecSegLimit;
 };

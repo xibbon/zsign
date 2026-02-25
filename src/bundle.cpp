@@ -208,7 +208,8 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	jvalue jvInfo;
 	jvInfo.read_plist_from_file(strInfoPlistPath.c_str());
 	string strBundleExe = resolve_bundle_executable_rel_path(strFolder, jvInfo["CFBundleExecutable"]);
-
+	bool isMacResourceEnvelope = ZFile::IsFileExistsV("%s/Info.plist", strFolder.c_str())
+		&& ZFile::IsFolderV("%s/MacOS", strFolder.c_str());
 #ifdef _WIN32
 	iconv ic;
 	strBundleExe = ic.U82A(strBundleExe);
@@ -232,63 +233,114 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		strKey = ic.A2U8(strKey);
 #endif
 
-		bool bomit1 = false;
-		bool bomit2 = false;
-
-		if (ZFile::IsPathSuffix(strKey, ".lproj/locversion.plist")) {
-			bomit1 = true;
-			bomit2 = true;
-		}
-
-		if (ZFile::IsPathSuffix(strKey, ".DS_Store")
-			|| "Info.plist" == strKey
+		bool isLocalizationVersionFile = ZFile::IsPathSuffix(strKey, ".lproj/locversion.plist");
+		bool isDSStore = ZFile::IsPathSuffix(strKey, ".DS_Store");
+		bool isInfoOrPkg = ("Info.plist" == strKey
 			|| "PkgInfo" == strKey
 			|| "Contents/Info.plist" == strKey
-			|| "Contents/PkgInfo" == strKey) {
-			bomit2 = true;
-		}
+			|| "Contents/PkgInfo" == strKey);
+		bool isLocalizationPath = (string::npos != strKey.rfind(".lproj/"));
+		bool isResourcesPath = (0 == strKey.rfind("Resources/", 0));
 
-		if (!bomit1) {
-			if (string::npos != strKey.rfind(".lproj/")) {
-				jvCodeRes["files"][strKey]["hash"] = "data:" + strSHA1Base64;
-				jvCodeRes["files"][strKey]["optional"] = true;
-			} else {
-				jvCodeRes["files"][strKey] = "data:" + strSHA1Base64;
+		if (isMacResourceEnvelope) {
+			// For macOS bundles, mirror modern CodeResources behavior:
+			// - `files` tracks only `Resources/*` with SHA-1.
+			// - `files2` tracks SHA-256 and includes embedded.provisionprofile.
+			bool omitFiles = isLocalizationVersionFile || !isResourcesPath;
+			bool omitFiles2 = isLocalizationVersionFile || isDSStore || isInfoOrPkg;
+
+			if (!omitFiles) {
+				if (isLocalizationPath) {
+					jvCodeRes["files"][strKey]["hash"] = "data:" + strSHA1Base64;
+					jvCodeRes["files"][strKey]["optional"] = true;
+				} else {
+					jvCodeRes["files"][strKey] = "data:" + strSHA1Base64;
+				}
 			}
-		}
 
-		if (!bomit2) {
-			jvCodeRes["files2"][strKey]["hash"] = "data:" + strSHA1Base64;
-			jvCodeRes["files2"][strKey]["hash2"] = "data:" + strSHA256Base64;
-			if (string::npos != strKey.rfind(".lproj/")) {
-				jvCodeRes["files2"][strKey]["optional"] = true;
+			if (!omitFiles2) {
+				jvCodeRes["files2"][strKey]["hash2"] = "data:" + strSHA256Base64;
+				if (isLocalizationPath) {
+					jvCodeRes["files2"][strKey]["optional"] = true;
+				}
+			}
+		} else {
+			bool bomit1 = isLocalizationVersionFile;
+			bool bomit2 = isLocalizationVersionFile || isDSStore || isInfoOrPkg;
+
+			if (!bomit1) {
+				if (isLocalizationPath) {
+					jvCodeRes["files"][strKey]["hash"] = "data:" + strSHA1Base64;
+					jvCodeRes["files"][strKey]["optional"] = true;
+				} else {
+					jvCodeRes["files"][strKey] = "data:" + strSHA1Base64;
+				}
+			}
+
+			if (!bomit2) {
+				jvCodeRes["files2"][strKey]["hash"] = "data:" + strSHA1Base64;
+				jvCodeRes["files2"][strKey]["hash2"] = "data:" + strSHA256Base64;
+				if (isLocalizationPath) {
+					jvCodeRes["files2"][strKey]["optional"] = true;
+				}
 			}
 		}
 	}
 
-	jvCodeRes["rules"]["^.*"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/"]["optional"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/"]["weight"] = 1000.0;
-	jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
-	jvCodeRes["rules"]["^Base\\.lproj/"]["weight"] = 1010.0;
-	jvCodeRes["rules"]["^version.plist$"] = true;
+	if (isMacResourceEnvelope) {
+		jvCodeRes["rules"]["^Resources/"] = true;
+		jvCodeRes["rules"]["^Resources/.*\\.lproj/"]["optional"] = true;
+		jvCodeRes["rules"]["^Resources/.*\\.lproj/"]["weight"] = 1000.0;
+		jvCodeRes["rules"]["^Resources/.*\\.lproj/locversion.plist$"]["omit"] = true;
+		jvCodeRes["rules"]["^Resources/.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+		jvCodeRes["rules"]["^Resources/Base\\.lproj/"]["weight"] = 1010.0;
+		jvCodeRes["rules"]["^version.plist$"] = true;
 
-	jvCodeRes["rules2"]["^.*"] = true;
-	jvCodeRes["rules2"][".*\\.dSYM($|/)"]["weight"] = 11.0;
-	jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["omit"] = true;
-	jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["weight"] = 2000.0;
-	jvCodeRes["rules2"]["^.*\\.lproj/"]["optional"] = true;
-	jvCodeRes["rules2"]["^.*\\.lproj/"]["weight"] = 1000.0;
-	jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
-	jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
-	jvCodeRes["rules2"]["^Base\\.lproj/"]["weight"] = 1010.0;
-	jvCodeRes["rules2"]["^Info\\.plist$"]["omit"] = true;
-	jvCodeRes["rules2"]["^Info\\.plist$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^PkgInfo$"]["omit"] = true;
-	jvCodeRes["rules2"]["^PkgInfo$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^embedded\\.provisionprofile$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^version\\.plist$"]["weight"] = 20.0;
+		jvCodeRes["rules2"][".*\\.dSYM($|/)"]["weight"] = 11.0;
+		jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["omit"] = true;
+		jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["weight"] = 2000.0;
+		jvCodeRes["rules2"]["^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/"]["nested"] = true;
+		jvCodeRes["rules2"]["^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/"]["weight"] = 10.0;
+		jvCodeRes["rules2"]["^.*"] = true;
+		jvCodeRes["rules2"]["^Info\\.plist$"]["omit"] = true;
+		jvCodeRes["rules2"]["^Info\\.plist$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^PkgInfo$"]["omit"] = true;
+		jvCodeRes["rules2"]["^PkgInfo$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^Resources/"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^Resources/.*\\.lproj/"]["optional"] = true;
+		jvCodeRes["rules2"]["^Resources/.*\\.lproj/"]["weight"] = 1000.0;
+		jvCodeRes["rules2"]["^Resources/.*\\.lproj/locversion.plist$"]["omit"] = true;
+		jvCodeRes["rules2"]["^Resources/.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+		jvCodeRes["rules2"]["^Resources/Base\\.lproj/"]["weight"] = 1010.0;
+		jvCodeRes["rules2"]["^[^/]+$"]["nested"] = true;
+		jvCodeRes["rules2"]["^[^/]+$"]["weight"] = 10.0;
+		jvCodeRes["rules2"]["^embedded\\.provisionprofile$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^version\\.plist$"]["weight"] = 20.0;
+	} else {
+		jvCodeRes["rules"]["^.*"] = true;
+		jvCodeRes["rules"]["^.*\\.lproj/"]["optional"] = true;
+		jvCodeRes["rules"]["^.*\\.lproj/"]["weight"] = 1000.0;
+		jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
+		jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+		jvCodeRes["rules"]["^Base\\.lproj/"]["weight"] = 1010.0;
+		jvCodeRes["rules"]["^version.plist$"] = true;
+
+		jvCodeRes["rules2"]["^.*"] = true;
+		jvCodeRes["rules2"][".*\\.dSYM($|/)"]["weight"] = 11.0;
+		jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["omit"] = true;
+		jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["weight"] = 2000.0;
+		jvCodeRes["rules2"]["^.*\\.lproj/"]["optional"] = true;
+		jvCodeRes["rules2"]["^.*\\.lproj/"]["weight"] = 1000.0;
+		jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
+		jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+		jvCodeRes["rules2"]["^Base\\.lproj/"]["weight"] = 1010.0;
+		jvCodeRes["rules2"]["^Info\\.plist$"]["omit"] = true;
+		jvCodeRes["rules2"]["^Info\\.plist$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^PkgInfo$"]["omit"] = true;
+		jvCodeRes["rules2"]["^PkgInfo$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^embedded\\.provisionprofile$"]["weight"] = 20.0;
+		jvCodeRes["rules2"]["^version\\.plist$"]["weight"] = 20.0;
+	}
 
 	return true;
 }

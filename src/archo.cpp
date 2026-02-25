@@ -3,7 +3,22 @@
 #include "archo.h"
 #include "signing.h"
 
-uint64_t ZArchO::s_uExecSegLimit = 0;
+#ifndef LC_BUILD_VERSION
+#define LC_BUILD_VERSION 0x00000032
+#endif
+
+#ifndef PLATFORM_MACOS
+#define PLATFORM_MACOS 1
+#endif
+
+struct build_version_command_local {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint32_t platform;
+	uint32_t minos;
+	uint32_t sdk;
+	uint32_t ntools;
+};
 
 ZArchO::ZArchO()
 {
@@ -18,10 +33,12 @@ ZArchO::ZArchO()
 	m_bEncrypted = false;
 	m_b64Bit = false;
 	m_bBigEndian = false;
+	m_bMacOSBinary = false;
 	m_bEnoughSpace = true;
 	m_pCodeSignSegment = NULL;
 	m_pLinkEditSegment = NULL;
 	m_uLoadCommandsFreeSpace = 0;
+	m_uExecSegLimit = 0;
 }
 
 bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
@@ -51,7 +68,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command* seglc = (segment_command*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section* sect = (section*)((pLoadCommand + sizeof(segment_command)) + sizeof(section) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -71,7 +88,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command_64* seglc = (segment_command_64*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section_64* sect = (section_64*)((pLoadCommand + sizeof(segment_command_64)) + sizeof(section_64) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -93,6 +110,19 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 			encryption_info_command* crypt_cmd = (encryption_info_command*)pLoadCommand;
 			if (BO(crypt_cmd->cryptid) >= 1) {
 				m_bEncrypted = true;
+			}
+		}
+		break;
+		case LC_VERSION_MIN_MACOSX:
+		{
+			m_bMacOSBinary = true;
+		}
+		break;
+		case LC_BUILD_VERSION:
+		{
+			build_version_command_local* bvc = (build_version_command_local*)pLoadCommand;
+			if (BO(bvc->platform) == PLATFORM_MACOS) {
+				m_bMacOSBinary = true;
 			}
 		}
 		break;
@@ -324,6 +354,35 @@ void ZArchO::PrintInfo()
 	ZLog::Print("------------------------------------------------------------------\n");
 }
 
+static uint8_t resolve_code_directory_page_size_log2(uint8_t* pSignBase)
+{
+	if (NULL == pSignBase) {
+		return 12;
+	}
+
+	CS_SuperBlob* psb = (CS_SuperBlob*)pSignBase;
+	if (CSMAGIC_EMBEDDED_SIGNATURE != LE(psb->magic)) {
+		return 12;
+	}
+
+	CS_BlobIndex* pbi = (CS_BlobIndex*)(pSignBase + sizeof(CS_SuperBlob));
+	for (uint32_t i = 0; i < LE(psb->count); i++, pbi++) {
+		uint32_t uType = LE(pbi->type);
+		if (CSSLOT_CODEDIRECTORY != uType && CSSLOT_ALTERNATE_CODEDIRECTORIES != uType) {
+			continue;
+		}
+
+		uint8_t* pSlotBase = pSignBase + LE(pbi->offset);
+		CS_CodeDirectory cdHeader = *((CS_CodeDirectory*)pSlotBase);
+		uint32_t uLength = LE(cdHeader.length);
+		if (uLength >= 44) {
+			return cdHeader.pageSize;
+		}
+	}
+
+	return 12;
+}
+
 bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset, 
 	bool bForce, 
 	const string& strBundleId, 
@@ -389,6 +448,12 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		uExecSegFlags |= CS_EXECSEG_MAIN_BINARY | CS_EXECSEG_ALLOW_UNSIGNED;
 	}
 
+	uint8_t uPageSizeLog2 = resolve_code_directory_page_size_log2(m_pSignBase);
+	if (m_bMacOSBinary && BO(m_pHeader->cputype) == CPU_TYPE_ARM64 && uPageSizeLog2 < 14) {
+		// arm64 macOS binaries require 16K CodeDirectory pages for strict validation.
+		uPageSizeLog2 = 14;
+	}
+
 	string strCodeDirectorySlot;
 	string strAltnateCodeDirectorySlot;
 	if (!pSignAsset->m_bSHA256Only) {
@@ -397,7 +462,8 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 			m_uCodeLength,
 			pCodeSlots1Data,
 			uCodeSlots1DataLength,
-			s_uExecSegLimit,
+			uPageSizeLog2,
+			m_uExecSegLimit,
 			uExecSegFlags,
 			strBundleId,
 			pSignAsset->m_strTeamId,
@@ -416,7 +482,8 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		m_uCodeLength,
 		pCodeSlots256Data,
 		uCodeSlots256DataLength,
-		s_uExecSegLimit,
+		uPageSizeLog2,
+		m_uExecSegLimit,
 		uExecSegFlags,
 		strBundleId,
 		pSignAsset->m_strTeamId,
@@ -435,9 +502,12 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	}
 
 	string strCMSSignatureSlot;
-	if (!pSignAsset->m_bAdhoc) { //adhoc remove cms signature slot
-		ZSign::SlotBuildCMSSignature(pSignAsset, strCodeDirectorySlot, strAltnateCodeDirectorySlot, strCMSSignatureSlot);
-	}
+	ZSign::SlotBuildCMSSignature(
+		pSignAsset,
+		strCodeDirectorySlot,
+		strAltnateCodeDirectorySlot,
+		strCMSSignatureSlot
+	);
 
 	uint32_t uCodeDirectorySlotLength = (uint32_t)strCodeDirectorySlot.size();
 	uint32_t uRequirementsSlotLength = (uint32_t)strRequirementsSlot.size();
@@ -569,6 +639,65 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 		return false;
 	}
 
+	if (NULL != m_pCodeSignSegment) {
+		codesignature_command* pcslc = (codesignature_command*)m_pCodeSignSegment;
+		uint32_t uCurrentDataSize = BO(pcslc->datasize);
+		uint32_t uMaxDataSize = m_uLength - m_uCodeLength;
+		uint32_t uDesiredDataSize = (uint32_t)strCodeSignBlob.size();
+		const uint32_t uCodeSignatureReserve = 18000;
+		if (uDesiredDataSize + uCodeSignatureReserve <= uMaxDataSize) {
+			uDesiredDataSize += uCodeSignatureReserve;
+		} else {
+			uDesiredDataSize = uMaxDataSize;
+		}
+
+		if (uCurrentDataSize != uDesiredDataSize) {
+			pcslc->datasize = BO(uDesiredDataSize);
+
+			int64_t nDataSizeDelta = (int64_t)uDesiredDataSize - (int64_t)uCurrentDataSize;
+			if (nDataSizeDelta != 0 && NULL != m_pLinkEditSegment) {
+				load_command* pLinkEditLoadCommand = (load_command*)m_pLinkEditSegment;
+				uint32_t uVMAlign = (m_bMacOSBinary && BO(m_pHeader->cputype) == CPU_TYPE_ARM64)
+					? 16384
+					: 4096;
+
+				switch (BO(pLinkEditLoadCommand->cmd)) {
+				case LC_SEGMENT:
+				{
+					segment_command* pSegment = (segment_command*)m_pLinkEditSegment;
+					uint32_t uNewFileSize = (uint32_t)((int64_t)BO(pSegment->filesize) + nDataSizeDelta);
+					pSegment->filesize = BO(uNewFileSize);
+					pSegment->vmsize = BO(ZUtil::ByteAlign(uNewFileSize, uVMAlign));
+				}
+				break;
+				case LC_SEGMENT_64:
+				{
+					segment_command_64* pSegment = (segment_command_64*)m_pLinkEditSegment;
+					uint32_t uNewFileSize = (uint32_t)((int64_t)BO((uint32_t)pSegment->filesize) + nDataSizeDelta);
+					pSegment->filesize = BO((uint32_t)uNewFileSize);
+					pSegment->vmsize = BO((uint32_t)ZUtil::ByteAlign(uNewFileSize, uVMAlign));
+				}
+				break;
+				}
+			}
+
+			string strRebuiltCodeSignBlob;
+			BuildCodeSignature(
+				pSignAsset,
+				bForce,
+				strBundleId,
+				strInfoSHA1,
+				strInfoSHA256,
+				strCodeResourcesSHA1,
+				strCodeResourcesSHA256,
+				strRebuiltCodeSignBlob
+			);
+			if (!strRebuiltCodeSignBlob.empty()) {
+				strCodeSignBlob.swap(strRebuiltCodeSignBlob);
+			}
+		}
+	}
+
 	int nSpaceLength = (int)m_uLength - (int)m_uCodeLength - (int)strCodeSignBlob.size();
 	if (nSpaceLength < 0) {
 		m_bEnoughSpace = false;
@@ -577,7 +706,9 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 	}
 
 	memcpy(m_pBase + m_uCodeLength, strCodeSignBlob.data(), strCodeSignBlob.size());
-	//memset(m_pBase + m_uCodeLength + strCodeSignBlob.size(), 0, nSpaceLength);
+	if (nSpaceLength > 0) {
+		memset(m_pBase + m_uCodeLength + strCodeSignBlob.size(), 0, nSpaceLength);
+	}
 	return true;
 }
 

@@ -67,7 +67,7 @@ int zsign_sign(
     success = asset.Init(
         cert, pkey, "",
         string(static_cast<const char *>(entitlements[0].data), entitlements[0].len),
-        is_adhoc, false, false
+        is_adhoc, true, false
     );
     if (!success) {
         *exception = strdup("Invalid developer certificate/private key");

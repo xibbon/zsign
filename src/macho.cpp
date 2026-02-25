@@ -158,6 +158,109 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 		}
 	}
 
+	uint32_t uMagic = *((uint32_t*)m_pBase);
+	if (FAT_CIGAM == uMagic || FAT_MAGIC == uMagic) {
+		fat_header fath = *((fat_header*)m_pBase);
+		int nFatArch = (FAT_MAGIC == uMagic) ? fath.nfat_arch : LE(fath.nfat_arch);
+		if (nFatArch > 0 && nFatArch == (int)m_arrArchOes.size()) {
+			uint32_t uAlign = 16384;
+			vector<fat_arch> arrArches;
+			vector<uint32_t> arrOldOffsets;
+			vector<uint32_t> arrSignedSizes;
+			arrArches.reserve(nFatArch);
+			arrOldOffsets.reserve(nFatArch);
+			arrSignedSizes.reserve(nFatArch);
+
+			for (int i = 0; i < nFatArch; i++) {
+				fat_arch arch = *((fat_arch*)(m_pBase + sizeof(fat_header) + sizeof(fat_arch) * i));
+				uint32_t uOldOffset = (FAT_MAGIC == uMagic) ? arch.offset : LE(arch.offset);
+
+				ZArchO* pArchO = m_arrArchOes[i];
+				if (NULL == pArchO || NULL == pArchO->m_pCodeSignSegment) {
+					return false;
+				}
+
+				codesignature_command* pCodeSig = (codesignature_command*)pArchO->m_pCodeSignSegment;
+				uint32_t uDataSize = pArchO->m_bBigEndian ? LE(pCodeSig->datasize) : pCodeSig->datasize;
+				uint32_t uSignedSliceSize = pArchO->m_uCodeLength + uDataSize;
+
+				arrArches.push_back(arch);
+				arrOldOffsets.push_back(uOldOffset);
+				arrSignedSizes.push_back(uSignedSliceSize);
+			}
+
+			uint32_t uFatHeaderSize = sizeof(fat_header) + (uint32_t)arrArches.size() * sizeof(fat_arch);
+			uint32_t uPadding1 = (uAlign - (uFatHeaderSize % uAlign)) % uAlign;
+			uint32_t uOffset = uFatHeaderSize + uPadding1;
+			for (size_t i = 0; i < arrArches.size(); i++) {
+				fat_arch& arch = arrArches[i];
+				uint32_t uSignedSliceSize = arrSignedSizes[i];
+				arch.align = (FAT_MAGIC == uMagic) ? 14 : BE((uint32_t)14);
+				arch.offset = (FAT_MAGIC == uMagic) ? uOffset : BE(uOffset);
+				arch.size = (FAT_MAGIC == uMagic) ? uSignedSliceSize : BE(uSignedSliceSize);
+				uOffset += uSignedSliceSize;
+				uint32_t uPad = (uAlign - (uOffset % uAlign)) % uAlign;
+				uOffset += uPad;
+			}
+
+			string strNewFatMachOFile = m_strFile + ".signed.fat";
+			ZFile::RemoveFile(strNewFatMachOFile.c_str());
+
+			string strFatHeader;
+			strFatHeader.append((const char*)&fath, sizeof(fat_header));
+			for (size_t i = 0; i < arrArches.size(); i++) {
+				strFatHeader.append((const char*)&arrArches[i], sizeof(fat_arch));
+			}
+			if (!ZFile::AppendFile(strNewFatMachOFile.c_str(), strFatHeader)) {
+				return false;
+			}
+
+			if (uPadding1 > 0) {
+				string strPadding1;
+				strPadding1.append(uPadding1, 0);
+				if (!ZFile::AppendFile(strNewFatMachOFile.c_str(), strPadding1)) {
+					ZFile::RemoveFile(strNewFatMachOFile.c_str());
+					return false;
+				}
+			}
+
+			for (size_t i = 0; i < arrArches.size(); i++) {
+				uint32_t uOldOffset = arrOldOffsets[i];
+				uint32_t uSignedSliceSize = arrSignedSizes[i];
+				if (!ZFile::AppendFile(
+					strNewFatMachOFile.c_str(),
+					(const char*)m_pBase + uOldOffset,
+					uSignedSliceSize
+				)) {
+					ZFile::RemoveFile(strNewFatMachOFile.c_str());
+					return false;
+				}
+
+				uint32_t uPad = (uAlign - (uSignedSliceSize % uAlign)) % uAlign;
+				if (uPad > 0 && i + 1 < arrArches.size()) {
+					string strPadding;
+					strPadding.append(uPad, 0);
+					if (!ZFile::AppendFile(strNewFatMachOFile.c_str(), strPadding)) {
+						ZFile::RemoveFile(strNewFatMachOFile.c_str());
+						return false;
+					}
+				}
+			}
+
+			if (!CloseFile()) {
+				ZFile::RemoveFile(strNewFatMachOFile.c_str());
+				return false;
+			}
+
+			ZFile::RemoveFile(m_strFile.c_str());
+			if (0 != rename(strNewFatMachOFile.c_str(), m_strFile.c_str())) {
+				ZFile::RemoveFile(strNewFatMachOFile.c_str());
+				return false;
+			}
+			return true;
+		}
+	}
+
 	return CloseFile();
 }
 

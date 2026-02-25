@@ -24,7 +24,8 @@ string ZSign::_DER(const jvalue& data)
 	if (data.is_bool()) {
 		strOutput.append(1, 0x01);
 		strOutput.append(1, 1);
-		strOutput.append(1, data.as_bool() ? 1 : 0);
+		// DER canonical TRUE is 0xff.
+		strOutput.append(1, data.as_bool() ? (char)0xff : 0);
 	} else if (data.is_int()) {
 		uint64_t uVal = data.as_int64();
 		strOutput.append(1, 0x02);
@@ -66,9 +67,6 @@ string ZSign::_DER(const jvalue& data)
 
 			strDict += strVal;
 		}
-
-		strOutput.append(1, 0x31);
-		_DERLength(strOutput, strDict.size());
 		strOutput += strDict;
 	} else if (data.is_double()) {
 		assert(false);
@@ -263,12 +261,20 @@ bool ZSign::SlotBuildEntitlements(const string& strEntitlements, string& strOutp
 		return false;
 	}
 
+	string strNormalizedEntitlements = strEntitlements;
+	ZUtil::StringReplace(strNormalizedEntitlements, "\t", "    ");
+	ZUtil::StringReplace(
+		strNormalizedEntitlements,
+		"<plist version=\"1.0\">\n<dict/>\n</plist>\n",
+		"<plist version=\"1.0\"><dict/></plist>\n"
+	);
+
 	uint32_t uMagic = BE((uint32_t)CSMAGIC_EMBEDDED_ENTITLEMENTS);
-	uint32_t uLength = BE((uint32_t)strEntitlements.size() + 8);
+	uint32_t uLength = BE((uint32_t)strNormalizedEntitlements.size() + 8);
 
 	strOutput.append((const char*)&uMagic, sizeof(uMagic));
 	strOutput.append((const char*)&uLength, sizeof(uLength));
-	strOutput.append(strEntitlements.data(), strEntitlements.size());
+	strOutput.append(strNormalizedEntitlements.data(), strNormalizedEntitlements.size());
 
 	return true;
 }
@@ -283,13 +289,38 @@ bool ZSign::SlotBuildDerEntitlements(const string& strEntitlements, string& strO
 	jvalue jvInfo;
 	jvInfo.read_plist(strEntitlements);
 
-	string strRawEntitlementsData = _DER(jvInfo);
+	// Apple's DER entitlements use an application-specific wrapper:
+	// appl[16] { INTEGER 1, [16] <entitlements-object> }.
+	string strEntitlementsBody;
+	if (jvInfo.is_object() && jvInfo.size() == 0) {
+		// Match Apple's encoding for an empty root dictionary.
+		strEntitlementsBody.clear();
+	} else {
+		strEntitlementsBody = _DER(jvInfo);
+	}
+
+	string strWrappedEntitlements;
+	string strVersion;
+	strVersion.append(1, 0x02);
+	strVersion.append(1, 0x01);
+	strVersion.append(1, 0x01);
+
+	string strContextPayload;
+	strContextPayload.append(1, (char)0xB0);
+	_DERLength(strContextPayload, strEntitlementsBody.size());
+	strContextPayload += strEntitlementsBody;
+
+	string strTopPayload = strVersion + strContextPayload;
+	strWrappedEntitlements.append(1, (char)0x70);
+	_DERLength(strWrappedEntitlements, strTopPayload.size());
+	strWrappedEntitlements += strTopPayload;
+
 	uint32_t uMagic = BE((uint32_t)CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
-	uint32_t uLength = BE((uint32_t)strRawEntitlementsData.size() + 8);
+	uint32_t uLength = BE((uint32_t)strWrappedEntitlements.size() + 8);
 
 	strOutput.append((const char*)&uMagic, sizeof(uMagic));
 	strOutput.append((const char*)&uLength, sizeof(uLength));
-	strOutput.append(strRawEntitlementsData.data(), strRawEntitlementsData.size());
+	strOutput.append(strWrappedEntitlements.data(), strWrappedEntitlements.size());
 
 	return true;
 }
@@ -400,6 +431,7 @@ bool ZSign::SlotBuildCodeDirectory(bool bAlternate,
 	uint32_t uCodeLength,
 	uint8_t* pCodeSlotsData,
 	uint32_t uCodeSlotsDataLength,
+	uint8_t pageSizeLog2,
 	uint64_t execSegLimit,
 	uint64_t execSegFlags,
 	const string& strBundleId,
@@ -434,7 +466,11 @@ bool ZSign::SlotBuildCodeDirectory(bool bAlternate,
 	cdHeader.hashSize = bAlternate ? 32 : 20;
 	cdHeader.hashType = bAlternate ? 2 : 1;
 	cdHeader.spare1 = 0;
-	cdHeader.pageSize = 12;
+	uint8_t resolvedPageSizeLog2 = pageSizeLog2;
+	if (resolvedPageSizeLog2 < 12 || resolvedPageSizeLog2 > 16) {
+		resolvedPageSizeLog2 = 12;
+	}
+	cdHeader.pageSize = resolvedPageSizeLog2;
 	cdHeader.spare2 = 0;
 	cdHeader.scatterOffset = 0;
 	cdHeader.teamOffset = 0;
@@ -629,13 +665,24 @@ bool ZSign::SlotBuildCMSSignature(ZSignAsset* pSignAsset,
 	jvalue jvHashes;
 	string strCDHashesPlist;
 	string strCodeDirectorySlotSHA1;
+	string strCodeDirectorySlotSHA256;
 	string strAltnateCodeDirectorySlot256;
 	ZSHA::SHA1(strCodeDirectorySlot, strCodeDirectorySlotSHA1);
-	ZSHA::SHA256(strAltnateCodeDirectorySlot, strAltnateCodeDirectorySlot256);
+	ZSHA::SHA256(strCodeDirectorySlot, strCodeDirectorySlotSHA256);
+	if (!strAltnateCodeDirectorySlot.empty()) {
+		ZSHA::SHA256(strAltnateCodeDirectorySlot, strAltnateCodeDirectorySlot256);
+	} else {
+		// In SHA256-only mode there is no alternate code directory slot.
+		// Reuse the primary SHA256 hash for CMS CDHashes2 metadata.
+		strAltnateCodeDirectorySlot256 = strCodeDirectorySlotSHA256;
+	}
 
 	size_t cdHashSize = strCodeDirectorySlotSHA1.size();
 	jvHashes["cdhashes"][0].assign_data(strCodeDirectorySlotSHA1.data(), cdHashSize);
-	jvHashes["cdhashes"][1].assign_data(strAltnateCodeDirectorySlot256.data(), cdHashSize);
+	jvHashes["cdhashes"][1].assign_data(
+		strAltnateCodeDirectorySlot256.data(),
+		cdHashSize
+	);
 	jvHashes.style_write_plist(strCDHashesPlist);
 
 	string strCMSData;
