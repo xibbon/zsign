@@ -19,7 +19,9 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/xtool-org/xtool-core", .upToNextMinor(from: "1.4.0")),
+        .package(
+            url: "https://github.com/xibbon/xtool-core.git",
+            revision: "bff9cd0259917f31b4af1cc9cec91f677cb3c109"),
     ],
     targets: [
         .target(
