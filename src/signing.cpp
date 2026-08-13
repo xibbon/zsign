@@ -662,28 +662,17 @@ bool ZSign::SlotBuildCMSSignature(ZSignAsset* pSignAsset,
 		return true;
 	}
 
-	jvalue jvHashes;
 	string strCDHashesPlist;
 	string strCodeDirectorySlotSHA1;
-	string strCodeDirectorySlotSHA256;
 	string strAltnateCodeDirectorySlot256;
-	ZSHA::SHA1(strCodeDirectorySlot, strCodeDirectorySlotSHA1);
-	ZSHA::SHA256(strCodeDirectorySlot, strCodeDirectorySlotSHA256);
-	if (!strAltnateCodeDirectorySlot.empty()) {
-		ZSHA::SHA256(strAltnateCodeDirectorySlot, strAltnateCodeDirectorySlot256);
-	} else {
-		// In SHA256-only mode there is no alternate code directory slot.
-		// Reuse the primary SHA256 hash for CMS CDHashes2 metadata.
-		strAltnateCodeDirectorySlot256 = strCodeDirectorySlotSHA256;
+	if (!BuildCodeDirectoryHashes(
+			strCodeDirectorySlot,
+			strAltnateCodeDirectorySlot,
+			strCDHashesPlist,
+			strCodeDirectorySlotSHA1,
+			strAltnateCodeDirectorySlot256)) {
+		return false;
 	}
-
-	size_t cdHashSize = strCodeDirectorySlotSHA1.size();
-	jvHashes["cdhashes"][0].assign_data(strCodeDirectorySlotSHA1.data(), cdHashSize);
-	jvHashes["cdhashes"][1].assign_data(
-		strAltnateCodeDirectorySlot256.data(),
-		cdHashSize
-	);
-	jvHashes.style_write_plist(strCDHashesPlist);
 
 	string strCMSData;
 	if (!pSignAsset->GenerateCMS(strCodeDirectorySlot, strCDHashesPlist, strCodeDirectorySlotSHA1, strAltnateCodeDirectorySlot256, strCMSData)) {
@@ -697,6 +686,38 @@ bool ZSign::SlotBuildCMSSignature(ZSignAsset* pSignAsset,
 	strOutput.append((const char*)&uLength, sizeof(uLength));
 	strOutput.append(strCMSData.data(), strCMSData.size());
 	return true;
+}
+
+bool ZSign::BuildCodeDirectoryHashes(
+	const string& strCodeDirectorySlot,
+	const string& strAlternateCodeDirectorySlot,
+	string& strCDHashesPlist,
+	string& strCodeDirectorySlotSHA1,
+	string& strCodeDirectorySlotSHA256)
+{
+	jvalue jvHashes;
+	strCodeDirectorySlotSHA1.clear();
+	strCodeDirectorySlotSHA256.clear();
+
+	if (strAlternateCodeDirectorySlot.empty()) {
+		if (!ZSHA::SHA256(strCodeDirectorySlot, strCodeDirectorySlotSHA256) ||
+			strCodeDirectorySlotSHA256.size() < 20) {
+			return false;
+		}
+		jvHashes["cdhashes"][0].assign_data(strCodeDirectorySlotSHA256.data(), 20);
+	} else {
+		if (!ZSHA::SHA1(strCodeDirectorySlot, strCodeDirectorySlotSHA1) ||
+			!ZSHA::SHA256(strAlternateCodeDirectorySlot, strCodeDirectorySlotSHA256) ||
+			strCodeDirectorySlotSHA1.size() != 20 ||
+			strCodeDirectorySlotSHA256.size() < 20) {
+			return false;
+		}
+		jvHashes["cdhashes"][0].assign_data(strCodeDirectorySlotSHA1);
+		jvHashes["cdhashes"][1].assign_data(strCodeDirectorySlotSHA256.data(), 20);
+	}
+
+	jvHashes.style_write_plist(strCDHashesPlist);
+	return !strCDHashesPlist.empty();
 }
 
 uint32_t ZSign::GetCodeSignatureLength(uint8_t* pCSBase)

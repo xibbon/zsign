@@ -38,7 +38,8 @@ private:
 
 public:
 	static bool		CMSError();
-	static void*	GenerateASN1Type(const string& value);
+	static void*	GenerateASN1Type(const string& algorithm, const string& value);
+	static void*	GenerateHashAgilityAttribute(const string& sha1Digest, const string& sha256Digest);
 	static bool		GetCertInfo(void* pcert, jvalue& jvCertInfo);
 	static bool		GetCMSInfo(uint8_t* pCMSData, uint32_t uCMSLength, jvalue& jvOutput);
 	static bool		GetCMSContent(const string& strCMSDataInput, string& strContentOutput);

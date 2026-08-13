@@ -107,34 +107,91 @@ bool ZSignAsset::CMSError()
 	return false;
 }
 
-void* ZSignAsset::GenerateASN1Type(const string& value)
+void* ZSignAsset::GenerateASN1Type(const string& algorithm, const string& value)
 {
 	long errline = -1;
-	char* genstr = NULL;
 	BIO* ldapbio = BIO_new(BIO_s_mem());
 	CONF* cnf = NCONF_new(NULL);
-
-	if (cnf == NULL) {
+	if (ldapbio == NULL || cnf == NULL) {
 		ZLog::Error(">>> NCONF_new failed\n");
 		BIO_free(ldapbio);
+		NCONF_free(cnf);
+		return NULL;
 	}
-	string a = "asn1=SEQUENCE:A\n[A]\nC=OBJECT:sha256\nB=FORMAT:HEX,OCT:" + value + "\n";
-	int code = BIO_puts(ldapbio, a.c_str());
+
+	string config = "asn1=SEQUENCE:A\n[A]\nC=OBJECT:" + algorithm +
+		"\nB=FORMAT:HEX,OCT:" + value + "\n";
+	if (BIO_puts(ldapbio, config.c_str()) <= 0) {
+		BIO_free(ldapbio);
+		NCONF_free(cnf);
+		return NULL;
+	}
 	if (NCONF_load_bio(cnf, ldapbio, &errline) <= 0) {
 		BIO_free(ldapbio);
 		NCONF_free(cnf);
 		ZLog::PrintV(">>> NCONF_load_bio failed %d\n", errline);
+		return NULL;
 	}
 	BIO_free(ldapbio);
-	genstr = NCONF_get_string(cnf, "default", "asn1");
+	char* genstr = NCONF_get_string(cnf, "default", "asn1");
 
 	if (genstr == NULL) {
 		ZLog::Error(">>> NCONF_get_string failed\n");
 		NCONF_free(cnf);
+		return NULL;
 	}
 	ASN1_TYPE* ret = ASN1_generate_nconf(genstr, cnf);
 	NCONF_free(cnf);
 	return ret;
+}
+
+void* ZSignAsset::GenerateHashAgilityAttribute(
+	const string& sha1Digest,
+	const string& sha256Digest)
+{
+	if ((!sha1Digest.empty() && sha1Digest.size() != 20) ||
+		sha256Digest.size() != 32) {
+		return NULL;
+	}
+
+	ASN1_OBJECT* object = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
+	X509_ATTRIBUTE* attribute = X509_ATTRIBUTE_new();
+	if (!object || !attribute || !X509_ATTRIBUTE_set1_object(attribute, object)) {
+		ASN1_OBJECT_free(object);
+		X509_ATTRIBUTE_free(attribute);
+		return NULL;
+	}
+	ASN1_OBJECT_free(object);
+
+	auto addValue = [attribute](const string& algorithm, const string& digest) {
+		string hexDigest;
+		char byteString[3] = { 0 };
+		for (size_t i = 0; i < digest.size(); i++) {
+			snprintf(byteString, sizeof(byteString), "%02X", (uint8_t)digest[i]);
+			hexDigest += byteString;
+		}
+
+		ASN1_TYPE* type = (ASN1_TYPE*)GenerateASN1Type(algorithm, hexDigest);
+		if (!type || type->type != V_ASN1_SEQUENCE) {
+			ASN1_TYPE_free(type);
+			return false;
+		}
+		int result = X509_ATTRIBUTE_set1_data(
+			attribute,
+			V_ASN1_SEQUENCE,
+			type->value.sequence->data,
+			type->value.sequence->length);
+		ASN1_TYPE_free(type);
+		return result == 1;
+	};
+
+	if ((!sha1Digest.empty() && !addValue("sha1", sha1Digest)) ||
+		!addValue("sha256", sha256Digest)) {
+		X509_ATTRIBUTE_free(attribute);
+		return NULL;
+	}
+
+	return attribute;
 }
 
 bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHashData, const string& strCDHashesPlist, const string& strCodeDirectorySlotSHA1, const string& strAltnateCodeDirectorySlot256, string& strCMSOutput)
@@ -208,32 +265,26 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 			return CMSError();
 		}
 
-		int addHashPlist = CMS_signed_add1_attr_by_OBJ(si, obj, 0x4, strCDHashesPlist.c_str(), (int)strCDHashesPlist.size());
+		int addHashPlist = CMS_signed_add1_attr_by_OBJ(
+			si,
+			obj,
+			V_ASN1_OCTET_STRING,
+			strCDHashesPlist.c_str(),
+			(int)strCDHashesPlist.size());
+		ASN1_OBJECT_free(obj);
 		if (!addHashPlist) {
 			return CMSError();
 		}
 
-		// add CDHashes
-		string sha256;
-		char buf[16] = { 0 };
-		for (size_t i = 0; i < strAltnateCodeDirectorySlot256.size(); i++) {
-			snprintf(buf, sizeof(buf), "%02x", (uint8_t)strAltnateCodeDirectorySlot256[i]);
-			sha256 += buf;
-		}
-		transform(sha256.begin(), sha256.end(), sha256.begin(), ::toupper);
-
-		ASN1_OBJECT* obj2 = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
-		if (!obj2) {
+		X509_ATTRIBUTE* attr = (X509_ATTRIBUTE*)GenerateHashAgilityAttribute(
+			strCodeDirectorySlotSHA1,
+			strAltnateCodeDirectorySlot256);
+		if (!attr) {
 			return CMSError();
 		}
 
-		X509_ATTRIBUTE* attr = X509_ATTRIBUTE_new();
-		X509_ATTRIBUTE_set1_object(attr, obj2);
-
-		ASN1_TYPE* type_256 = (ASN1_TYPE*)GenerateASN1Type(sha256);
-		X509_ATTRIBUTE_set1_data(attr, V_ASN1_SEQUENCE,
-			type_256->value.asn1_string->data, type_256->value.asn1_string->length);
 		int addHashSHA = CMS_signed_add1_attr(si, attr);
+		X509_ATTRIBUTE_free(attr);
 		if (!addHashSHA) {
 			return CMSError();
 		}

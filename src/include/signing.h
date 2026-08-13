@@ -1,4 +1,7 @@
 #pragma once
+#include <stdint.h>
+
+#include "common/mach-o.h"
 #include "openssl.h"
 
 class ZSign
@@ -32,6 +35,11 @@ public:
 										const string& strCodeDirectorySlot,
 										const string& strAltnateCodeDirectorySlot,
 										string& strOutput);
+	static bool BuildCodeDirectoryHashes(const string& strCodeDirectorySlot,
+										const string& strAlternateCodeDirectorySlot,
+										string& strCDHashesPlist,
+										string& strCodeDirectorySlotSHA1,
+										string& strCodeDirectorySlotSHA256);
 
 	static bool GetCodeSignatureCodeSlotsData(uint8_t* pCSBase, 
 												uint8_t*& pCodeSlots1, 

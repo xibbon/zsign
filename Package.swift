@@ -42,6 +42,11 @@ let package = Package(
                 .product(name: "SignerSupport", package: "xtool-core")
             ]
         ),
+        .executableTarget(
+            name: "CMSHashMetadataTests",
+            dependencies: ["zsign"],
+            path: "Tests/CMSHashMetadataTests"
+        ),
     ],
     cxxLanguageStandard: .cxx11
 )
